@@ -1,0 +1,84 @@
+name: Build Skate3 aarch64 (RK3326 / M9 Pro)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '*.md']
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: ubuntu:20.04
+    timeout-minutes: 180
+
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      # glibc 2.31: keine LSE-Atomics, kein LTO-Bruch, libc dynamisch
+      RUSTFLAGS: >-
+        -C target-cpu=cortex-a35
+        -C target-feature=+crc,-outline-atomics
+        -C link-arg=-Wl,--gc-sections
+        -C link-arg=-Wl,--as-needed
+        -C link-arg=-Wl,-O2
+        -C link-arg=-static-libgcc
+        -C panic=abort
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # ── Multiarch für arm64-Dev-Pakete ─────────────────────────
+      - name: aarch64 Multiarch aktivieren
+        run: |
+          dpkg --add-architecture arm64
+          sed -i -E 's/^deb (\[[^]]*\] )?http/deb [arch=amd64] http/' /etc/apt/sources.list
+          printf '%s\n' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe' \
+            > /etc/apt/sources.list.d/arm64.list
+          apt-get update
+
+      # ── Rust + Cross-Tools ─────────────────────────────────────
+      - name: Rust & aarch64-Toolchain installieren
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
+            libasound2-dev:arm64 libudev-dev:arm64 libdrm-dev:arm64 \
+            libgbm-dev:arm64 libegl-dev:arm64 libgles2-mesa-dev:arm64
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source $HOME/.cargo/env
+          rustup target add aarch64-unknown-linux-gnu
+
+      # ── Sysroot (EGL/GLES-Pkg-Configs) ─────────────────────────
+      - name: Cross-Sysroot einrichten
+        run: bash scripts/ci-setup-sysroot.sh   # aus deinem WOTS2-Repo kopieren
+
+      # ── Build ──────────────────────────────────────────────────
+      - name: cargo build (aarch64)
+        run: |
+          source $HOME/.cargo/env
+          cargo build --release --target aarch64-unknown-linux-gnu -p skate-core -p skate-game
+
+      # ── glibc-Verifikation (hartes Fail) ───────────────────────
+      - name: glibc 2.31 prüfen
+        run: |
+          set -euo pipefail
+          BIN=target/aarch64-unknown-linux-gnu/release/skate3
+          MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
+            | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
+            | sed 's/^GLIBC_//' | sort -Vu | tail -1)
+          echo "Höchste GLIBC-Version: ${MAX:-keine}"
+          if [ -n "$MAX" ] && [ "$(printf '%s\n2.30\n' "$MAX" | sort -V | tail -1)" != "2.30" ]; then
+            echo "::error::Binary braucht GLIBC_$MAX, ArkOS hat nur 2.30"
+            exit 1
+          fi
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: skate3-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/skate3
+          retention-days: 30
