@@ -3,18 +3,30 @@ name: Build Skate3 aarch64 (RK3326 / M9 Pro)
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths-ignore: ['docs/**', '*.md']
+    branches: [main, master]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README.md'
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build aarch64 (glibc 2.31 für ArkOS)
     runs-on: ubuntu-22.04
     container: ubuntu:20.04
     timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
 
     env:
+      DEBIAN_FRONTEND: noninteractive
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      # glibc 2.31: keine LSE-Atomics, kein LTO-Bruch, libc dynamisch
+      # Cortex-A35 (RK3326): CRC an, LSE-Atomics aus (sonst SIGILL),
+      # libc bleibt dynamisch für glibc-2.31-Kompatibilität
       RUSTFLAGS: >-
         -C target-cpu=cortex-a35
         -C target-feature=+crc,-outline-atomics
@@ -23,62 +35,145 @@ jobs:
         -C link-arg=-Wl,-O2
         -C link-arg=-static-libgcc
         -C panic=abort
+      RUST_BACKTRACE: "1"
+      CARGO_TERM_COLOR: always
+      JOBS: "4"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: false
 
-      # ── Multiarch für arm64-Dev-Pakete ─────────────────────────
+      - name: Repo-Struktur prüfen
+        run: |
+          set -euo pipefail
+          echo "== Root =="; ls -la
+          echo "== Cargo.toml =="
+          [ -f Cargo.toml ] && head -50 Cargo.toml || echo "FEHLT: Cargo.toml"
+          echo "== .cargo/config.toml =="
+          [ -f .cargo/config.toml ] && cat .cargo/config.toml || echo "keine .cargo/config.toml"
+
       - name: aarch64 Multiarch aktivieren
         run: |
+          set -euo pipefail
           dpkg --add-architecture arm64
+          cp /etc/apt/sources.list /etc/apt/sources.list.bak
           sed -i -E 's/^deb (\[[^]]*\] )?http/deb [arch=amd64] http/' /etc/apt/sources.list
           printf '%s\n' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe' \
             > /etc/apt/sources.list.d/arm64.list
           apt-get update
 
-      # ── Rust + Cross-Tools ─────────────────────────────────────
-      - name: Rust & aarch64-Toolchain installieren
+      - name: aarch64 Dev-Pakete installieren
         run: |
+          set -euo pipefail
           apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
-            libasound2-dev:arm64 libudev-dev:arm64 libdrm-dev:arm64 \
-            libgbm-dev:arm64 libegl-dev:arm64 libgles2-mesa-dev:arm64
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          source $HOME/.cargo/env
+            file patchelf \
+            libasound2-dev:arm64 libudev-dev:arm64 \
+            libdrm-dev:arm64 libgbm-dev:arm64 \
+            libegl-dev:arm64 libgles2-mesa-dev:arm64
+
+      - name: Rust installieren
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable
+          # Persistent für alle folgenden Steps
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # PATH auch für den aktuellen Step
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustc --version
+          cargo --version
+
+      - name: aarch64-Target hinzufügen
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-unknown-linux-gnu
 
-      # ── Sysroot (EGL/GLES-Pkg-Configs) ─────────────────────────
-      - name: Cross-Sysroot einrichten
-        run: bash scripts/ci-setup-sysroot.sh   # aus deinem WOTS2-Repo kopieren
-
-      # ── Build ──────────────────────────────────────────────────
-      - name: cargo build (aarch64)
+      - name: Cargo Build (aarch64, workspace)
         run: |
-          source $HOME/.cargo/env
-          cargo build --release --target aarch64-unknown-linux-gnu -p skate-core -p skate-game
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build \
+            --release \
+            --target aarch64-unknown-linux-gnu \
+            --workspace \
+            --jobs "$JOBS" \
+            2>&1 | tee build.log
 
-      # ── glibc-Verifikation (hartes Fail) ───────────────────────
+      - name: Release-Binaries auflisten
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "== Release-Verzeichnis =="
+          ls -la target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
+          echo ""
+          echo "== Ausführbare Binaries (Top-Level) =="
+          find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
+            -type f -executable ! -name "*.so*" ! -name "*.d" 2>/dev/null || true
+
       - name: glibc 2.31 prüfen
         run: |
           set -euo pipefail
-          BIN=target/aarch64-unknown-linux-gnu/release/skate3
-          MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
-            | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
-            | sed 's/^GLIBC_//' | sort -Vu | tail -1)
-          echo "Höchste GLIBC-Version: ${MAX:-keine}"
-          if [ -n "$MAX" ] && [ "$(printf '%s\n2.30\n' "$MAX" | sort -V | tail -1)" != "2.30" ]; then
-            echo "::error::Binary braucht GLIBC_$MAX, ArkOS hat nur 2.30"
+          BIN_DIR=target/aarch64-unknown-linux-gnu/release
+          MAX_GLIBC=2.30
+          BINS=$(find "$BIN_DIR" -maxdepth 1 -type f -executable \
+                 ! -name "*.so*" ! -name "*.d" 2>/dev/null)
+          if [ -z "$BINS" ]; then
+            echo "::error::Kein ausführbares Binary in $BIN_DIR gefunden"
             exit 1
           fi
+          FAIL=0
+          for BIN in $BINS; do
+            echo "== Prüfe: $BIN =="
+            file "$BIN"
+            MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
+              | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
+              | sed 's/^GLIBC_//' | sort -Vu | tail -1)
+            echo "  Höchste GLIBC-Version: ${MAX:-keine}"
+            if [ -n "$MAX" ] && [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$MAX" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+              echo "  ::error::Braucht GLIBC_$MAX, ArkOS hat nur $MAX_GLIBC"
+              FAIL=1
+            else
+              echo "  OK (<= GLIBC_$MAX_GLIBC)"
+            fi
+          done
+          exit $FAIL
 
-      - name: Artefakt hochladen
+      - name: Bundle vorbereiten
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for b in target/aarch64-unknown-linux-gnu/release/*; do
+            if [ -f "$b" ] && [ -x "$b" ] \
+               && [[ ! "$b" == *.so* ]] && [[ ! "$b" == *.d ]]; then
+              cp -a "$b" dist/
+            fi
+          done
+          echo "== dist/ =="
+          ls -la dist/ || echo "leer"
+
+      - name: Artefakt (Binaries) hochladen
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: skate3-aarch64
-          path: target/aarch64-unknown-linux-gnu/release/skate3
+          name: skate3-aarch64-binaries
+          path: dist/
           retention-days: 30
+          if-no-files-found: warn
+
+      - name: Build-Log hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skate3-build-log
+          path: build.log
+          retention-days: 14
+          if-no-files-found: warn
