@@ -24,6 +24,8 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
+      # Verhindert, dass rustup eine im Fork gepinnte Vita-Nightly lädt
+      RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       # Cortex-A35 (RK3326): CRC an, LSE-Atomics aus (sonst SIGILL),
       # libc bleibt dynamisch für glibc-2.31-Kompatibilität
@@ -45,14 +47,64 @@ jobs:
         with:
           submodules: false
 
+      # ═══════════════════════════════════════════════════════════════
+      # Struktur-Check: erkennt Vita-Reste und fehlende Workspace-Mitglieder
+      # ═══════════════════════════════════════════════════════════════
       - name: Repo-Struktur prüfen
         run: |
           set -euo pipefail
           echo "== Root =="; ls -la
-          echo "== Cargo.toml =="
-          [ -f Cargo.toml ] && head -50 Cargo.toml || echo "FEHLT: Cargo.toml"
-          echo "== .cargo/config.toml =="
-          [ -f .cargo/config.toml ] && cat .cargo/config.toml || echo "keine .cargo/config.toml"
+          echo ""
+          echo "== Cargo.toml (Workspace) =="
+          cat Cargo.toml
+          echo ""
+          echo "== Vorhandene Crates =="
+          for d in crates/*/; do
+            if [ -f "${d}Cargo.toml" ]; then
+              echo "  OK: $d"
+            else
+              echo "  WARNUNG: $d ohne Cargo.toml"
+            fi
+          done
+          echo ""
+          echo "== Vita-Reste =="
+          [ -f .cargo/config.toml ] && { echo "  .cargo/config.toml vorhanden:"; cat .cargo/config.toml; } || echo "  keine .cargo/config.toml"
+          [ -f rust-toolchain.toml ] && { echo "  rust-toolchain.toml vorhanden:"; cat rust-toolchain.toml; } || echo "  keine rust-toolchain.toml"
+          [ -f rust-toolchain ] && { echo "  rust-toolchain vorhanden:"; cat rust-toolchain; } || echo "  keine rust-toolchain"
+          echo ""
+          echo "== vendor/ =="
+          [ -d vendor ] && ls -la vendor/ || echo "  kein vendor/-Ordner"
+          echo ""
+          echo "== Fehlende Mitglieder prüfen =="
+          MISSING=0
+          for m in $(grep -oE 'crates/[a-zA-Z0-9_-]+' Cargo.toml | sort -u); do
+            if [ ! -f "$m/Cargo.toml" ]; then
+              echo "  FEHLT: $m"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -eq 1 ]; then
+            echo "::error::Cargo.toml referenziert nicht existierende Crates"
+            exit 1
+          fi
+
+      - name: Vita-Toolchain-Dateien neutralisieren
+        run: |
+          set -euo pipefail
+          # rust-toolchain(.toml) würde die aarch64-Toolchain überschreiben
+          for f in rust-toolchain rust-toolchain.toml; do
+            if [ -f "$f" ]; then
+              mv "$f" "$f.disabled-for-aarch64"
+              echo "Deaktiviert: $f"
+            fi
+          done
+          # .cargo/config.toml würde den Vita-Linker erzwingen.
+          # Wir behalten es als Referenz, aber die CI-Env-Vars und
+          # --config-Overrides unten haben Vorrang.
+          if [ -f .cargo/config.toml ]; then
+            cp .cargo/config.toml .cargo/config.toml.vita-backup
+            echo "Backup: .cargo/config.toml.vita-backup"
+          fi
 
       - name: aarch64 Multiarch aktivieren
         run: |
@@ -83,9 +135,7 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain stable
-          # Persistent für alle folgenden Steps
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # PATH auch für den aktuellen Step
           export PATH="$HOME/.cargo/bin:$PATH"
           rustc --version
           cargo --version
