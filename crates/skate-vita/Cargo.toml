@@ -28,7 +28,7 @@ serde.workspace = true
 glam = { version = "=0.30.10", default-features = false, features = ["std"] }
 # The span profiler of feature `stage-profile` (a tracing subscriber).
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
-
+libc = "0.2"
 [features]
 # Render-active benchmark: play ux0:data/SKATEVITA/autoplay/*.input with
 # rendering and write tick times and oracle dumps (src/autoplay.rs).
