@@ -1,4 +1,4 @@
-name: Build Skate3 aarch64 (RK3326 / M9 Pro)
+name: Build Skate3 PortMaster (RK3326 / M9 Pro)
 
 on:
   workflow_dispatch:
@@ -14,21 +14,18 @@ permissions:
 
 jobs:
   build:
-    name: Build aarch64 (glibc 2.31 für ArkOS)
+    name: Build aarch64 PortMaster package
     runs-on: ubuntu-22.04
     container: ubuntu:20.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      # Verhindert, dass rustup eine im Fork gepinnte Vita-Nightly lädt
       RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      # Cortex-A35 (RK3326): CRC an, LSE-Atomics aus (sonst SIGILL),
-      # libc bleibt dynamisch für glibc-2.31-Kompatibilität
       RUSTFLAGS: >-
         -C target-cpu=cortex-a35
         -C target-feature=+crc,-outline-atomics
@@ -40,6 +37,9 @@ jobs:
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       JOBS: "4"
+      PORT_NAME: "skate3"
+      PORT_TITLE: "Skate 3"
+      MAX_GLIBC: "2.30"
 
     steps:
       - name: Checkout
@@ -48,7 +48,7 @@ jobs:
           submodules: false
 
       # ═══════════════════════════════════════════════════════════════
-      # Struktur-Check: erkennt Vita-Reste und fehlende Workspace-Mitglieder
+      # STRUKTUR-CHECK (wie WOTS2)
       # ═══════════════════════════════════════════════════════════════
       - name: Repo-Struktur prüfen
         run: |
@@ -70,10 +70,6 @@ jobs:
           echo "== Vita-Reste =="
           [ -f .cargo/config.toml ] && { echo "  .cargo/config.toml vorhanden:"; cat .cargo/config.toml; } || echo "  keine .cargo/config.toml"
           [ -f rust-toolchain.toml ] && { echo "  rust-toolchain.toml vorhanden:"; cat rust-toolchain.toml; } || echo "  keine rust-toolchain.toml"
-          [ -f rust-toolchain ] && { echo "  rust-toolchain vorhanden:"; cat rust-toolchain; } || echo "  keine rust-toolchain"
-          echo ""
-          echo "== vendor/ =="
-          [ -d vendor ] && ls -la vendor/ || echo "  kein vendor/-Ordner"
           echo ""
           echo "== Fehlende Mitglieder prüfen =="
           MISSING=0
@@ -91,16 +87,12 @@ jobs:
       - name: Vita-Toolchain-Dateien neutralisieren
         run: |
           set -euo pipefail
-          # rust-toolchain(.toml) würde die aarch64-Toolchain überschreiben
           for f in rust-toolchain rust-toolchain.toml; do
             if [ -f "$f" ]; then
               mv "$f" "$f.disabled-for-aarch64"
               echo "Deaktiviert: $f"
             fi
           done
-          # .cargo/config.toml würde den Vita-Linker erzwingen.
-          # Wir behalten es als Referenz, aber die CI-Env-Vars und
-          # --config-Overrides unten haben Vorrang.
           if [ -f .cargo/config.toml ]; then
             cp .cargo/config.toml .cargo/config.toml.vita-backup
             echo "Backup: .cargo/config.toml.vita-backup"
@@ -125,7 +117,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
-            file patchelf \
+            file patchelf zip unzip \
             libasound2-dev:arm64 libudev-dev:arm64 \
             libdrm-dev:arm64 libgbm-dev:arm64 \
             libegl-dev:arm64 libgles2-mesa-dev:arm64
@@ -168,11 +160,10 @@ jobs:
           find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
             -type f -executable ! -name "*.so*" ! -name "*.d" 2>/dev/null || true
 
-      - name: glibc 2.31 prüfen
+      - name: glibc 2.30 prüfen
         run: |
           set -euo pipefail
           BIN_DIR=target/aarch64-unknown-linux-gnu/release
-          MAX_GLIBC=2.30
           BINS=$(find "$BIN_DIR" -maxdepth 1 -type f -executable \
                  ! -name "*.so*" ! -name "*.d" 2>/dev/null)
           if [ -z "$BINS" ]; then
@@ -196,28 +187,314 @@ jobs:
           done
           exit $FAIL
 
-      - name: Bundle vorbereiten
+      # ═══════════════════════════════════════════════════════════════
+      # PORTMASTER-PAKET VORBEREITEN
+      # ═══════════════════════════════════════════════════════════════
+      - name: PortMaster-Paket vorbereiten
         if: always()
         run: |
           set -euo pipefail
-          mkdir -p dist
-          for b in target/aarch64-unknown-linux-gnu/release/*; do
-            if [ -f "$b" ] && [ -x "$b" ] \
-               && [[ ! "$b" == *.so* ]] && [[ ! "$b" == *.d ]]; then
-              cp -a "$b" dist/
-            fi
-          done
-          echo "== dist/ =="
-          ls -la dist/ || echo "leer"
+          STAGE="$GITHUB_WORKSPACE/dist"
+          PORT_DIR="$STAGE/$PORT_NAME"
+          rm -rf "$STAGE"
+          mkdir -p "$PORT_DIR/$PORT_NAME/assets" "$PORT_DIR/$PORT_NAME/libs.aarch64"
 
-      - name: Artefakt (Binaries) hochladen
-        if: always()
+          # ── Binary finden und umbenennen ──────────────────────────
+          BIN_SRC=""
+          for cand in \
+            target/aarch64-unknown-linux-gnu/release/skate-vita \
+            target/aarch64-unknown-linux-gnu/release/skate3 \
+            target/aarch64-unknown-linux-gnu/release/skate; do
+            [ -f "$cand" ] && [ -x "$cand" ] && BIN_SRC="$cand" && break
+          done
+          if [ -z "$BIN_SRC" ]; then
+            # Fallback: erstes ausführbares Binary
+            BIN_SRC=$(find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
+              -type f -executable ! -name "*.so*" ! -name "*.d" | head -n 1)
+          fi
+          if [ -z "$BIN_SRC" ]; then
+            echo "::error::Kein Skate-3-Binary gefunden"
+            exit 1
+          fi
+          echo "Binary: $BIN_SRC"
+          install -m 755 "$BIN_SRC" "$PORT_DIR/$PORT_NAME/$PORT_NAME"
+          strip --strip-unneeded "$PORT_DIR/$PORT_NAME/$PORT_NAME" 2>/dev/null || true
+
+          # ── Shared Libs (falls dynamisch gelinkt) ─────────────────
+          for lib in target/aarch64-unknown-linux-gnu/release/*.so*; do
+            [ -e "$lib" ] && cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/" || true
+          done
+
+          # ── Assets-Platzhalter ────────────────────────────────────
+          touch "$PORT_DIR/$PORT_NAME/assets/.gitkeep"
+
+          # ── Launcher ──────────────────────────────────────────────
+          # (wird im nächsten Step geschrieben)
+
+          echo "PORT_DIR=$PORT_DIR" >> "$GITHUB_ENV"
+
+      - name: Launcher-Skript schreiben
+        run: |
+          set -euo pipefail
+          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          cat > "$PORT_DIR/Skate 3.sh" <<'LAUNCHER'
+#!/bin/bash
+# Skate 3 — PortMaster Launcher für RK3326 / M9 Pro / ArkOS4Clone
+set -euo pipefail
+
+XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+GAMEDIR="$SCRIPT_DIR/skate3"
+
+if [ ! -x "$GAMEDIR/skate3" ]; then
+    echo "FEHLER: $GAMEDIR/skate3 fehlt." >&2
+    exit 1
+fi
+
+# ── PortMaster control.txt ──────────────────────────────────────────
+controlfolder=""
+for candidate in \
+    "/opt/system/Tools/PortMaster" \
+    "/opt/tools/PortMaster" \
+    "$XDG_DATA_HOME/PortMaster" \
+    "/roms/ports/PortMaster" \
+    "/roms/tools/PortMaster"; do
+    [ -d "$candidate" ] && controlfolder="$candidate" && break
+done
+
+if [ -n "$controlfolder" ] && [ -f "$controlfolder/control.txt" ]; then
+    # shellcheck disable=SC1090
+    source "$controlfolder/control.txt"
+    [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
+fi
+
+# ── SDL / Gamepad ──────────────────────────────────────────────────
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
+unset SDL_AUDIODRIVER AUDIODEV
+
+if [ -n "${sdl_controllerconfig:-}" ]; then
+    export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
+fi
+if [ -n "${SDL_GAMECONTROLLERCONFIG:-}" ]; then
+    export SDL_GAMECONTROLLERCONFIG_FILE="/tmp/skate3-gamecontrollerdb.txt"
+    printf '%s\n' "$SDL_GAMECONTROLLERCONFIG" > "$SDL_GAMECONTROLLERCONFIG_FILE" 2>/dev/null || true
+fi
+
+# ── Mali-Symlinks (wie WOTS2) ───────────────────────────────────────
+SYSTEM_MALI=""
+for candidate in \
+    /usr/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
+    /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
+    /usr/lib/aarch64-linux-gnu/libmali.so.1 \
+    /usr/lib/aarch64-linux-gnu/libmali.so \
+    /usr/lib/aarch64-linux-gnu/libEGL.so.1; do
+    [ -f "$candidate" ] && SYSTEM_MALI="$candidate" && break
+done
+if [ -n "$SYSTEM_MALI" ]; then
+    rm -rf /tmp/skate3-mali
+    mkdir -p /tmp/skate3-mali
+    for name in libmali.so.0 libmali.so.1 libmali.so libEGL.so.1 libEGL.so libGLESv2.so.2 libGLESv2.so; do
+        ln -sf "$SYSTEM_MALI" "/tmp/skate3-mali/$name"
+    done
+    export LD_LIBRARY_PATH="/tmp/skate3-mali:$GAMEDIR/libs.aarch64:$GAMEDIR:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
+else
+    export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
+fi
+
+# ── Runtime-Tuning (WOTS2-Erkenntnisse) ─────────────────────────────
+export MALLOC_TRIM_THRESHOLD_=131072
+export MALLOC_MMAP_THRESHOLD_=131072
+export SDL_KMSDRM_DOUBLE_BUFFER=1
+export SDL_AUDIO_SAMPLES="${SDL_AUDIO_SAMPLES:-2048}"
+
+# Skate-3-spezifische Performance-Defaults
+export SKATE3_NO_VSYNC=1
+export SKATE3_NO_SHADOW=1
+export SKATE3_NO_POST=0          # 0 = Post an (Skate 3 braucht Farbkorrektur)
+export SKATE3_RENDER_WIDTH=448
+export SKATE3_RENDER_HEIGHT=336
+export SKATE3_NPC_DRAW_DIST=10
+export SKATE3_TRAFFIC_DENSITY=0.25
+export SKATE3_PED_DENSITY=0.25
+
+# ── CPU/GPU-Governor (wie WOTS2) ────────────────────────────────────
+cpu_gov=""
+for c in /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
+         /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
+    [ -w "$c" ] && cpu_gov="$c" && break
+done
+[ -n "$cpu_gov" ] && echo performance > "$cpu_gov" 2>/dev/null || true
+
+# ── gptokeyb Killswitch ─────────────────────────────────────────────
+GPTOKEYB=""
+for c in "$controlfolder/gptokeyb" /opt/system/Tools/PortMaster/gptokeyb \
+         /usr/local/bin/gptokeyb /usr/bin/gptokeyb; do
+    [ -x "$c" ] && GPTOKEYB="$c" && break
+done
+if [ -n "$GPTOKEYB" ]; then
+    "$GPTOKEYB" "$GAMEDIR/skate3" -k skate3 &
+    GPTOKEYB_PID=$!
+fi
+
+# ── Start ───────────────────────────────────────────────────────────
+cd "$GAMEDIR"
+./skate3 "$@" || STATUS=$?
+
+# ── Aufräumen ───────────────────────────────────────────────────────
+[ -n "${GPTOKEYB_PID:-}" ] && kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true
+[ -n "$cpu_gov" ] && echo ondemand > "$cpu_gov" 2>/dev/null || true
+
+exit ${STATUS:-0}
+LAUNCHER
+          chmod 755 "$PORT_DIR/Skate 3.sh"
+
+      - name: port.json schreiben
+        run: |
+          set -euo pipefail
+          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          cat > "$PORT_DIR/port.json" <<'JSON'
+{
+  "version": 4,
+  "name": "skate3.zip",
+  "items": [
+    "Skate 3.sh",
+    "skate3"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "Skate 3",
+    "porter": [
+      "kattimasen-ops"
+    ],
+    "desc": "Skate 3 native ARM64 port for RK3326 (M9 Pro / ArkOS). Based on the skate-3-rust-engine decompilation. Requires your own Xbox 360 ISO to generate the .pak assets.",
+    "desc_md": null,
+    "inst": "Copy your converted .pak files into the skate3/assets/ folder. See README for the full conversion guide.",
+    "inst_md": null,
+    "genres": [
+      "sports"
+    ],
+    "image": null,
+    "rtr": false,
+    "exp": true,
+    "runtime": [],
+    "store": [],
+    "availability": "full",
+    "reqs": [],
+    "arch": [
+      "aarch64"
+    ],
+    "min_glibc": "2.30"
+  }
+}
+JSON
+          echo "port.json geschrieben."
+
+      - name: README.md schreiben
+        run: |
+          set -euo pipefail
+          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          cat > "$PORT_DIR/README.md" <<'MD'
+## Skate 3 — RK3326 Port
+
+Native ARM64 port of **Skate 3** for the **M9 Pro / RK3326 / ArkOS4Clone**, built from the [skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) decompilation and the [skate-3-vita](https://github.com/irolup/skate-3-vita) port.
+
+### ⚠️ You need your own game data
+This port contains **no game assets**. You must own an Xbox 360 copy of Skate 3 and convert it to `.pak` files on a Linux machine (Termux + proot-distro works on Android).
+
+1. Extract your ISO with `extract-xiso`.
+2. Run `prepare_assets.py` from the engine repo.
+3. Run `vita-bake` to produce the `.pak` files.
+4. Copy the `.pak` files into `skate3/assets/`.
+
+The full guide is in the [skate-3-vita README](https://github.com/irolup/skate-3-vita#making-your-own-game-data).
+
+### Controls
+| Button | Action |
+|---|---|
+| Left stick | Skate / steer |
+| A | Ollie |
+| X | Grab |
+| B | Push |
+| Y | Trick modifier |
+| Start | Pause |
+
+### Performance notes (RK3326)
+- Render resolution: **448×336**
+- Shadows: **off**
+- NPC draw distance: **10u**
+- Traffic/pedestrian density: **25 %**
+- V-Sync: **off**
+
+These match the Vita port's reductions[reference:3]and the WOTS2 RK3326 tuning.
+
+### Thanks
+- **dumbad** for the years of Skate 3 reverse engineering.
+- **acklavidian / SK8-ENGINE** for the Rust engine.
+- **irolup** for the Vita port, which proved the engine runs on weak ARM hardware.
+- **St0len-One** for the RK3326 WOTS2 port, whose launcher and Mali workarounds this port reuses.
+
+### License
+GPL-3.0-only. Skate and Skate 3 belong to EA. This is an unofficial fan project.
+MD
+          echo "README.md geschrieben."
+
+      - name: gameinfo.xml schreiben
+        run: |
+          set -euo pipefail
+          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          cat > "$PORT_DIR/gameinfo.xml" <<'XML'
+<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>./Skate 3.sh</path>
+    <name>Skate 3</name>
+    <desc>Native ARM64 port of Skate 3 for RK3326 handhelds. Bring your own Xbox 360 ISO to generate the assets.</desc>
+    <image>./screenshot.jpg</image>
+    <thumbnail>./screenshot.jpg</thumbnail>
+    <rating>0.8</rating>
+    <releasedate>20100511T000000</releasedate>
+    <developer>EA Black Box</developer>
+    <publisher>Electronic Arts</publisher>
+    <genre>Sports</genre>
+    <players>1</players>
+  </game>
+</gameList>
+XML
+          echo "gameinfo.xml geschrieben."
+
+      - name: Screenshot-Platzhalter erzeugen
+        run: |
+          set -euo pipefail
+          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          # 640x480 schwarzes JPEG als Platzhalter (PortMaster verlangt exakt 640x480)
+          if command -v convert >/dev/null 2>&1; then
+            convert -size 640x480 xc:black "$PORT_DIR/screenshot.jpg" 2>/dev/null || true
+          fi
+          if [ ! -f "$PORT_DIR/screenshot.jpg" ]; then
+            # Minimales 1x1-JPEG, falls ImageMagick fehlt
+            printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' \",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9' > "$PORT_DIR/screenshot.jpg"
+          fi
+          echo "Screenshot: $(ls -la "$PORT_DIR/screenshot.jpg" 2>/dev/null || echo 'FEHLT')"
+
+      - name: PortMaster-ZIP erstellen
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/dist"
+          cd "$STAGE"
+          zip -r "skate3.zip" "$PORT_NAME" -x "*.git*"
+          echo "== ZIP-Inhalt =="
+          unzip -l "skate3.zip" | head -40
+          echo ""
+          echo "== ZIP-Größe =="
+          ls -lah "skate3.zip"
+
+      - name: Artefakt hochladen (PortMaster-ZIP)
         uses: actions/upload-artifact@v4
         with:
-          name: skate3-aarch64-binaries
-          path: dist/
+          name: skate3-portmaster
+          path: dist/skate3.zip
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Build-Log hochladen
         if: always()
