@@ -45,20 +45,18 @@ jobs:
           set -euo pipefail
           echo "== Root =="; ls -la
           echo ""
-          echo "== portmaster/ =="; ls -la portmaster/ || true
-          echo ""
-          echo "== crates/ =="; ls -la crates/ || true
-          echo ""
           echo "== Cargo.toml (Workspace) =="
           cat Cargo.toml
           echo ""
           echo "== Pflichtdateien pruefen =="
           MISSING=0
-          for f in .cargo/config.toml portmaster/Skate3.sh portmaster/port.json portmaster/README.md portmaster/gameinfo.xml; do
+          for f in .cargo/config.toml \
+                   crates/skate-game/src/fb0_writer.rs \
+                   crates/skate-game/src/headless_plugin.rs \
+                   crates/skate-game/src/image_copy.rs \
+                   portmaster/Skate3.sh portmaster/port.json \
+                   portmaster/README.md portmaster/gameinfo.xml; do
             if [ -f "$f" ]; then echo "  OK: $f"; else echo "  FEHLT: $f"; MISSING=1; fi
-          done
-          for m in $(grep -oE 'crates/[a-zA-Z0-9_-]+' Cargo.toml | sort -u); do
-            if [ ! -f "$m/Cargo.toml" ]; then echo "  FEHLT-CRATE: $m"; MISSING=1; fi
           done
           if [ "$MISSING" -eq 1 ]; then
             echo "::error::Pflichtdateien fehlen"
@@ -75,7 +73,6 @@ jobs:
             fi
           done
 
-      # ── REIHENFOLGE: Multiarch MUSS vor apt install laufen ──────────
       - name: aarch64 Multiarch aktivieren
         run: |
           set -euo pipefail
@@ -89,12 +86,11 @@ jobs:
             > /etc/apt/sources.list.d/arm64.list
           apt-get update
 
-      # ── git MUSS vor dem wgpu-Clone installiert sein ────────────────
-      - name: Build-Pakete installieren (inkl. git)
+      - name: Build-Pakete installieren (inkl. git und python3)
         run: |
           set -euo pipefail
           apt-get install -y --no-install-recommends \
-            git build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            git python3 build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
             file patchelf zip unzip imagemagick \
             libasound2-dev:arm64 libudev-dev:arm64 \
@@ -102,16 +98,15 @@ jobs:
             libegl-dev:arm64 libgles2-mesa-dev:arm64
           echo "== Tool-Versionen =="
           git --version
+          python3 --version
           gcc --version | head -1
           aarch64-linux-gnu-gcc --version | head -1
 
-      # ── Erst jetzt: wgpu klonen (git ist jetzt da) ──────────────────
-      - name: wgpu v27 klonen und Mali-G31-Patch anwenden
+      - name: wgpu v27.0.1 klonen und Mali-G31-Patch anwenden
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v27.0.0 \
+          git clone --depth 1 --branch v27.0.1 \
             https://github.com/gfx-rs/wgpu.git vendor/wgpu
-          echo "OK: vendor/wgpu angelegt"
 
           ADAPTER="vendor/wgpu/wgpu-hal/src/gles/adapter.rs"
           if [ ! -f "$ADAPTER" ]; then
@@ -194,39 +189,23 @@ jobs:
             --jobs "$JOBS" \
             2>&1 | tee build.log
 
-      - name: Release-Binaries auflisten
-        if: always()
-        run: |
-          set -euo pipefail
-          ls -la target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
-          echo ""
-          find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
-            -type f -executable ! -name "*.so*" ! -name "*.d" 2>/dev/null || true
-
       - name: glibc 2.30 pruefen
         run: |
           set -euo pipefail
-          BIN_DIR=target/aarch64-unknown-linux-gnu/release
-          BINS=$(find "$BIN_DIR" -maxdepth 1 -type f -executable \
-                 ! -name "*.so*" ! -name "*.d" 2>/dev/null)
-          if [ -z "$BINS" ]; then
-            echo "::error::Kein ausfuehrbares Binary in $BIN_DIR gefunden"
+          BIN=target/aarch64-unknown-linux-gnu/release/skate3rust
+          if [ ! -x "$BIN" ]; then
+            echo "::error::$BIN nicht gefunden"
             exit 1
           fi
-          FAIL=0
-          for BIN in $BINS; do
-            echo "== Pruefe: $BIN =="
-            file "$BIN"
-            MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
-              | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
-              | sed 's/^GLIBC_//' | sort -Vu | tail -1)
-            echo "  Hoechste GLIBC-Version: ${MAX:-keine}"
-            if [ -n "$MAX" ] && [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$MAX" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
-              echo "  ::error::Braucht GLIBC_$MAX, ArkOS hat nur $MAX_GLIBC"
-              FAIL=1
-            fi
-          done
-          exit $FAIL
+          file "$BIN"
+          MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
+            | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
+            | sed 's/^GLIBC_//' | sort -Vu | tail -1)
+          echo "Hoechste GLIBC-Version: ${MAX:-keine}"
+          if [ -n "$MAX" ] && [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$MAX" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+            echo "::error::Braucht GLIBC_$MAX, ArkOS hat nur $MAX_GLIBC"
+            exit 1
+          fi
 
       - name: PortMaster-Paket vorbereiten
         if: always()
@@ -235,30 +214,15 @@ jobs:
           STAGE="$GITHUB_WORKSPACE/dist"
           PORT_DIR="$STAGE/$PORT_NAME"
           rm -rf "$STAGE"
-          mkdir -p "$PORT_DIR/$PORT_NAME/assets" "$PORT_DIR/$PORT_NAME/libs.aarch64"
+          mkdir -p "$PORT_DIR/$PORT_NAME/assets"
 
-          BIN_SRC=""
-          for cand in \
-            target/aarch64-unknown-linux-gnu/release/skate-vita \
-            target/aarch64-unknown-linux-gnu/release/skate3 \
-            target/aarch64-unknown-linux-gnu/release/skate; do
-            if [ -f "$cand" ] && [ -x "$cand" ]; then BIN_SRC="$cand"; break; fi
-          done
-          if [ -z "$BIN_SRC" ]; then
-            BIN_SRC=$(find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
-              -type f -executable ! -name "*.so*" ! -name "*.d" | head -n 1)
-          fi
-          if [ -z "$BIN_SRC" ]; then
-            echo "::error::Kein Skate-3-Binary gefunden"
+          BIN="target/aarch64-unknown-linux-gnu/release/skate3rust"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::skate3rust-Binary fehlt"
             exit 1
           fi
-          echo "Binary: $BIN_SRC"
-          install -m 755 "$BIN_SRC" "$PORT_DIR/$PORT_NAME/$PORT_NAME"
-          strip --strip-unneeded "$PORT_DIR/$PORT_NAME/$PORT_NAME" 2>/dev/null || true
-
-          for lib in target/aarch64-unknown-linux-gnu/release/*.so*; do
-            if [ -e "$lib" ]; then cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/"; fi
-          done
+          install -m 755 "$BIN" "$PORT_DIR/$PORT_NAME/skate3"
+          strip --strip-unneeded "$PORT_DIR/$PORT_NAME/skate3" 2>/dev/null || true
           touch "$PORT_DIR/$PORT_NAME/assets/.gitkeep"
 
           cp "$GITHUB_WORKSPACE/portmaster/Skate3.sh"    "$PORT_DIR/Skate3.sh"
@@ -276,18 +240,15 @@ jobs:
           convert -size 640x480 xc:black -gravity center \
                   -fill white -pointsize 48 -annotate 0 "Skate 3" \
                   "$PORT_DIR/screenshot.jpg"
-          file "$PORT_DIR/screenshot.jpg"
 
       - name: PortMaster-ZIP erstellen
         run: |
           set -euo pipefail
-          STAGE="$GITHUB_WORKSPACE/dist"
-          cd "$STAGE"
+          cd "$GITHUB_WORKSPACE/dist"
           zip -r "skate3.zip" "$PORT_NAME" -x "*.git*"
           unzip -l "skate3.zip"
-          ls -lah "skate3.zip"
 
-      - name: Artefakt hochladen (PortMaster-ZIP)
+      - name: Artefakt hochladen
         uses: actions/upload-artifact@v4
         with:
           name: skate3-portmaster
