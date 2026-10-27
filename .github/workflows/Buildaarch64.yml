@@ -38,7 +38,6 @@ jobs:
       CARGO_TERM_COLOR: always
       JOBS: "4"
       PORT_NAME: "skate3"
-      PORT_TITLE: "Skate 3"
       MAX_GLIBC: "2.30"
 
     steps:
@@ -51,6 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "== Root =="; ls -la
+          echo ""
+          echo "== portmaster/ =="; ls -la portmaster/ || true
           echo ""
           echo "== Cargo.toml (Workspace) =="
           cat Cargo.toml
@@ -65,19 +66,19 @@ jobs:
           done
           echo ""
           echo "== Vita-Reste =="
-          if [ -f .cargo/config.toml ]; then echo "  .cargo/config.toml vorhanden:"; cat .cargo/config.toml; else echo "  keine .cargo/config.toml"; fi
-          if [ -f rust-toolchain.toml ]; then echo "  rust-toolchain.toml vorhanden:"; cat rust-toolchain.toml; else echo "  keine rust-toolchain.toml"; fi
+          if [ -f .cargo/config.toml ]; then echo "  .cargo/config.toml vorhanden"; else echo "  keine .cargo/config.toml"; fi
+          if [ -f rust-toolchain.toml ]; then echo "  rust-toolchain.toml vorhanden"; else echo "  keine rust-toolchain.toml"; fi
           echo ""
-          echo "== Fehlende Mitglieder pruefen =="
+          echo "== Pflichtdateien pruefen =="
           MISSING=0
+          for f in portmaster/Skate3.sh portmaster/port.json portmaster/README.md portmaster/gameinfo.xml; do
+            if [ -f "$f" ]; then echo "  OK: $f"; else echo "  FEHLT: $f"; MISSING=1; fi
+          done
           for m in $(grep -oE 'crates/[a-zA-Z0-9_-]+' Cargo.toml | sort -u); do
-            if [ ! -f "$m/Cargo.toml" ]; then
-              echo "  FEHLT: $m"
-              MISSING=1
-            fi
+            if [ ! -f "$m/Cargo.toml" ]; then echo "  FEHLT-CRATE: $m"; MISSING=1; fi
           done
           if [ "$MISSING" -eq 1 ]; then
-            echo "::error::Cargo.toml referenziert nicht existierende Crates"
+            echo "::error::Pflichtdateien fehlen"
             exit 1
           fi
 
@@ -92,7 +93,6 @@ jobs:
           done
           if [ -f .cargo/config.toml ]; then
             cp .cargo/config.toml .cargo/config.toml.vita-backup
-            echo "Backup: .cargo/config.toml.vita-backup"
           fi
 
       - name: aarch64 Multiarch aktivieren
@@ -150,10 +150,8 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          echo "== Release-Verzeichnis =="
           ls -la target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
           echo ""
-          echo "== Ausfuehrbare Binaries (Top-Level) =="
           find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
             -type f -executable ! -name "*.so*" ! -name "*.d" 2>/dev/null || true
 
@@ -178,8 +176,6 @@ jobs:
             if [ -n "$MAX" ] && [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$MAX" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
               echo "  ::error::Braucht GLIBC_$MAX, ArkOS hat nur $MAX_GLIBC"
               FAIL=1
-            else
-              echo "  OK (<= GLIBC_$MAX_GLIBC)"
             fi
           done
           exit $FAIL
@@ -215,229 +211,20 @@ jobs:
           for lib in target/aarch64-unknown-linux-gnu/release/*.so*; do
             if [ -e "$lib" ]; then cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/"; fi
           done
-
           touch "$PORT_DIR/$PORT_NAME/assets/.gitkeep"
+
+          cp "$GITHUB_WORKSPACE/portmaster/Skate3.sh"    "$PORT_DIR/Skate3.sh"
+          cp "$GITHUB_WORKSPACE/portmaster/port.json"    "$PORT_DIR/port.json"
+          cp "$GITHUB_WORKSPACE/portmaster/README.md"    "$PORT_DIR/README.md"
+          cp "$GITHUB_WORKSPACE/portmaster/gameinfo.xml" "$PORT_DIR/gameinfo.xml"
+          chmod 755 "$PORT_DIR/Skate3.sh"
+
           echo "PORT_DIR=$PORT_DIR" >> "$GITHUB_ENV"
 
-      - name: Launcher-Skript schreiben
+      - name: Screenshot erzeugen
         run: |
           set -euo pipefail
-          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          cat > "$PORT_DIR/Skate 3.sh" <<'LAUNCHER'
-#!/bin/bash
-# Skate 3 - PortMaster Launcher fuer RK3326 / M9 Pro / ArkOS4Clone
-set -euo pipefail
-
-XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-GAMEDIR="$SCRIPT_DIR/skate3"
-
-if [ ! -x "$GAMEDIR/skate3" ]; then
-    echo "FEHLER: $GAMEDIR/skate3 fehlt." >&2
-    exit 1
-fi
-
-controlfolder=""
-for candidate in \
-    "/opt/system/Tools/PortMaster" \
-    "/opt/tools/PortMaster" \
-    "$XDG_DATA_HOME/PortMaster" \
-    "/roms/ports/PortMaster" \
-    "/roms/tools/PortMaster"; do
-    if [ -d "$candidate" ]; then controlfolder="$candidate"; break; fi
-done
-
-if [ -n "$controlfolder" ] && [ -f "$controlfolder/control.txt" ]; then
-    source "$controlfolder/control.txt"
-    if [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ]; then source "${controlfolder}/mod_${CFW_NAME}.txt"; fi
-fi
-
-export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
-unset SDL_AUDIODRIVER AUDIODEV
-
-if [ -n "${sdl_controllerconfig:-}" ]; then
-    export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
-fi
-if [ -n "${SDL_GAMECONTROLLERCONFIG:-}" ]; then
-    export SDL_GAMECONTROLLERCONFIG_FILE="/tmp/skate3-gamecontrollerdb.txt"
-    printf '%s\n' "$SDL_GAMECONTROLLERCONFIG" > "$SDL_GAMECONTROLLERCONFIG_FILE" 2>/dev/null || true
-fi
-
-# Mali-Symlinks (WOTS2-Erkenntnis)
-SYSTEM_MALI=""
-for candidate in \
-    /usr/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
-    /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
-    /usr/lib/aarch64-linux-gnu/libmali.so.1 \
-    /usr/lib/aarch64-linux-gnu/libmali.so \
-    /usr/lib/aarch64-linux-gnu/libEGL.so.1; do
-    if [ -f "$candidate" ]; then SYSTEM_MALI="$candidate"; break; fi
-done
-if [ -n "$SYSTEM_MALI" ]; then
-    rm -rf /tmp/skate3-mali
-    mkdir -p /tmp/skate3-mali
-    for name in libmali.so.0 libmali.so.1 libmali.so libEGL.so.1 libEGL.so libGLESv2.so.2 libGLESv2.so; do
-        ln -sf "$SYSTEM_MALI" "/tmp/skate3-mali/$name"
-    done
-    export LD_LIBRARY_PATH="/tmp/skate3-mali:$GAMEDIR/libs.aarch64:$GAMEDIR:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
-else
-    export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
-fi
-
-# Runtime-Tuning (WOTS2-Erkenntnisse)
-export MALLOC_TRIM_THRESHOLD_=131072
-export MALLOC_MMAP_THRESHOLD_=131072
-export SDL_KMSDRM_DOUBLE_BUFFER=1
-export SDL_AUDIO_SAMPLES="${SDL_AUDIO_SAMPLES:-2048}"
-
-# Skate-3 Performance-Defaults (Vita + WOTS2-Hebel)
-export SKATE3_NO_VSYNC=1
-export SKATE3_NO_SHADOW=1
-export SKATE3_NO_POST=0
-export SKATE3_RENDER_WIDTH=448
-export SKATE3_RENDER_HEIGHT=336
-export SKATE3_NPC_DRAW_DIST=10
-export SKATE3_TRAFFIC_DENSITY=0.25
-export SKATE3_PED_DENSITY=0.25
-
-# CPU-Governor (WOTS2-Erkenntnis)
-cpu_gov=""
-for c in /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
-         /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
-    if [ -w "$c" ]; then cpu_gov="$c"; break; fi
-done
-if [ -n "$cpu_gov" ]; then echo performance > "$cpu_gov" 2>/dev/null || true; fi
-
-# gptokeyb Killswitch
-GPTOKEYB=""
-for c in "$controlfolder/gptokeyb" /opt/system/Tools/PortMaster/gptokeyb \
-         /usr/local/bin/gptokeyb /usr/bin/gptokeyb; do
-    if [ -x "$c" ]; then GPTOKEYB="$c"; break; fi
-done
-GPTOKEYB_PID=""
-if [ -n "$GPTOKEYB" ]; then
-    "$GPTOKEYB" "$GAMEDIR/skate3" -k skate3 &
-    GPTOKEYB_PID=$!
-fi
-
-cd "$GAMEDIR"
-STATUS=0
-./skate3 "$@" || STATUS=$?
-
-if [ -n "$GPTOKEYB_PID" ]; then kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true; fi
-if [ -n "$cpu_gov" ]; then echo ondemand > "$cpu_gov" 2>/dev/null || true; fi
-
-exit "$STATUS"
-LAUNCHER
-          chmod 755 "$PORT_DIR/Skate 3.sh"
-
-      - name: port.json schreiben
-        run: |
-          set -euo pipefail
-          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          cat > "$PORT_DIR/port.json" <<'JSON'
-{
-  "version": 4,
-  "name": "skate3.zip",
-  "items": [
-    "Skate 3.sh",
-    "skate3"
-  ],
-  "items_opt": [],
-  "attr": {
-    "title": "Skate 3",
-    "porter": ["kattimasen-ops"],
-    "desc": "Skate 3 native ARM64 port for RK3326 (M9 Pro / ArkOS). Based on the skate-3-rust-engine decompilation. Requires your own Xbox 360 ISO to generate the .pak assets.",
-    "desc_md": null,
-    "inst": "Copy your converted .pak files into the skate3/assets/ folder. See README for the full conversion guide.",
-    "inst_md": null,
-    "genres": ["sports"],
-    "image": null,
-    "rtr": false,
-    "exp": true,
-    "runtime": [],
-    "store": [],
-    "availability": "full",
-    "reqs": [],
-    "arch": ["aarch64"],
-    "min_glibc": "2.30"
-  }
-}
-JSON
-
-      - name: README.md schreiben
-        run: |
-          set -euo pipefail
-          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          cat > "$PORT_DIR/README.md" <<'MD'
-## Skate 3 - RK3326 Port
-
-Native ARM64 port of **Skate 3** for the **M9 Pro / RK3326 / ArkOS4Clone**, built from the [skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) decompilation and the [skate-3-vita](https://github.com/irolup/skate-3-vita) port.
-
-### You need your own game data
-This port contains **no game assets**. You must own an Xbox 360 copy of Skate 3 and convert it to `.pak` files on a Linux machine (Termux + proot-distro works on Android).
-
-1. Extract your ISO with `extract-xiso`.
-2. Run `prepare_assets.py` from the engine repo.
-3. Run `vita-bake` to produce the `.pak` files.
-4. Copy the `.pak` files into `skate3/assets/`.
-
-Full guide: [skate-3-vita README](https://github.com/irolup/skate-3-vita#making-your-own-game-data).
-
-### Controls
-| Button | Action |
-|---|---|
-| Left stick | Skate / steer |
-| A | Ollie |
-| X | Grab |
-| B | Push |
-| Y | Trick modifier |
-| Start | Pause |
-
-### Performance notes (RK3326)
-- Render resolution: **448x336**
-- Shadows: **off**
-- NPC draw distance: **10u**
-- Traffic/pedestrian density: **25%**
-- V-Sync: **off**
-
-### Thanks
-- **dumbad** for the years of Skate 3 reverse engineering.
-- **acklavidian / SK8-ENGINE** for the Rust engine.
-- **irolup** for the Vita port.
-- **St0len-One** for the RK3326 WOTS2 port.
-
-### License
-GPL-3.0-only. Skate and Skate 3 belong to EA. This is an unofficial fan project.
-MD
-
-      - name: gameinfo.xml schreiben
-        run: |
-          set -euo pipefail
-          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          cat > "$PORT_DIR/gameinfo.xml" <<'XML'
-<?xml version="1.0"?>
-<gameList>
-  <game>
-    <path>./Skate 3.sh</path>
-    <name>Skate 3</name>
-    <desc>Native ARM64 port of Skate 3 for RK3326 handhelds. Bring your own Xbox 360 ISO to generate the assets.</desc>
-    <image>./screenshot.jpg</image>
-    <thumbnail>./screenshot.jpg</thumbnail>
-    <rating>0.8</rating>
-    <releasedate>20100511T000000</releasedate>
-    <developer>EA Black Box</developer>
-    <publisher>Electronic Arts</publisher>
-    <genre>Sports</genre>
-    <players>1</players>
-  </game>
-</gameList>
-XML
-
-      - name: Screenshot-Platzhalter erzeugen
-        run: |
-          set -euo pipefail
-          PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
+          PORT_DIR="${PORT_DIR:?PORT_DIR nicht gesetzt}"
           convert -size 640x480 xc:black -gravity center \
                   -fill white -pointsize 48 -annotate 0 "Skate 3" \
                   "$PORT_DIR/screenshot.jpg"
@@ -449,7 +236,7 @@ XML
           STAGE="$GITHUB_WORKSPACE/dist"
           cd "$STAGE"
           zip -r "skate3.zip" "$PORT_NAME" -x "*.git*"
-          unzip -l "skate3.zip" | head -40
+          unzip -l "skate3.zip"
           ls -lah "skate3.zip"
 
       - name: Artefakt hochladen (PortMaster-ZIP)
