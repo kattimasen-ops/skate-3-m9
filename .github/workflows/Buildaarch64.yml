@@ -26,14 +26,8 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      RUSTFLAGS: >-
-        -C target-cpu=cortex-a35
-        -C target-feature=-outline-atomics
-        -C link-arg=-Wl,--gc-sections
-        -C link-arg=-Wl,--as-needed
-        -C link-arg=-Wl,-O2
-        -C link-arg=-static-libgcc
-        -C panic=abort
+      WGPU_BACKEND: "gl"
+      WGPU_SETTINGS_PRIO: "webgl2"
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       JOBS: "4"
@@ -71,7 +65,7 @@ jobs:
           echo ""
           echo "== Pflichtdateien pruefen =="
           MISSING=0
-          for f in portmaster/Skate3.sh portmaster/port.json portmaster/README.md portmaster/gameinfo.xml; do
+          for f in .cargo/config.toml portmaster/Skate3.sh portmaster/port.json portmaster/README.md portmaster/gameinfo.xml; do
             if [ -f "$f" ]; then echo "  OK: $f"; else echo "  FEHLT: $f"; MISSING=1; fi
           done
           for m in $(grep -oE 'crates/[a-zA-Z0-9_-]+' Cargo.toml | sort -u); do
@@ -91,9 +85,61 @@ jobs:
               echo "Deaktiviert: $f"
             fi
           done
-          if [ -f .cargo/config.toml ]; then
-            cp .cargo/config.toml .cargo/config.toml.vita-backup
+
+      - name: wgpu v27 klonen und Mali-G31-Patch anwenden
+        run: |
+          set -euo pipefail
+          echo "== wgpu v27 klonen =="
+          git clone --depth 1 --branch v27.0.0 \
+            https://github.com/gfx-rs/wgpu.git vendor/wgpu
+          echo "OK: vendor/wgpu angelegt"
+
+          ADAPTER="vendor/wgpu/wgpu-hal/src/gles/adapter.rs"
+          if [ ! -f "$ADAPTER" ]; then
+            echo "::error::$ADAPTER nicht gefunden"
+            exit 1
           fi
+
+          echo "== Mali-G31-Patch anwenden =="
+          python3 - <<'PY'
+          import sys
+          path = "vendor/wgpu/wgpu-hal/src/gles/adapter.rs"
+          text = open(path).read()
+
+          old = """let max_storage_buffers_per_shader_stage = if vertex_shader_storage_blocks == 0 {
+              fragment_shader_storage_blocks
+          } else {
+              vertex_shader_storage_blocks.min(fragment_shader_storage_blocks)
+          };"""
+
+          new = """let max_storage_buffers_per_shader_stage = if vertex_shader_storage_blocks == 0 {
+              if vertex_ssbo_false_zero {
+                  fragment_shader_storage_blocks
+              } else {
+                  0 // Mali-G31 R36S-Fix: Keine SSBOs in keiner Stage
+              }
+          } else {
+              vertex_shader_storage_blocks.min(fragment_shader_storage_blocks)
+          };"""
+
+          if old not in text:
+              print("FEHLER: Anker in adapter.rs nicht gefunden", file=sys.stderr)
+              sys.exit(1)
+
+          text = text.replace(old, new, 1)
+          open(path, "w").write(text)
+          print("OK: wgpu-hal adapter.rs gepatcht.")
+          PY
+
+          echo "== Patch verifizieren =="
+          grep -n "Mali-G31 R36S-Fix" "$ADAPTER" || {
+            echo "::error::Patch nicht im Quellcode"
+            exit 1
+          }
+
+          echo "== [patch.crates-io] in Cargo.toml aktivieren =="
+          sed -i 's|^# wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|' Cargo.toml
+          grep -n "wgpu-hal" Cargo.toml
 
       - name: aarch64 Multiarch aktivieren
         run: |
@@ -114,7 +160,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
-            file patchelf zip unzip imagemagick \
+            file patchelf zip unzip imagemagick git \
             libasound2-dev:arm64 libudev-dev:arm64 \
             libdrm-dev:arm64 libgbm-dev:arm64 \
             libegl-dev:arm64 libgles2-mesa-dev:arm64
