@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>./Skate3.sh</path>
+    <name>Skate 3</name>
+    <desc>Native ARM64 port of Skate 3 for RK3326 handhelds. Bring your own Xbox 360 ISO to generate the assets.</desc>
+    <image>./screenshot.jpg</image>
+    <thumbnail>./screenshot.jpg</thumbnail>
+    <rating>0.8</rating>
+    <releasedate>20100511T000000</releasedate>
+    <developer>EA Black Box</developer>
+    <publisher>Electronic Arts</publisher>
+    <genre>Sports</genre>
+    <players>1</players>
+  </game>
+</gameList>
