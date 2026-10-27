@@ -47,21 +47,10 @@ jobs:
           echo ""
           echo "== portmaster/ =="; ls -la portmaster/ || true
           echo ""
+          echo "== crates/ =="; ls -la crates/ || true
+          echo ""
           echo "== Cargo.toml (Workspace) =="
           cat Cargo.toml
-          echo ""
-          echo "== Vorhandene Crates =="
-          for d in crates/*/; do
-            if [ -f "${d}Cargo.toml" ]; then
-              echo "  OK: $d"
-            else
-              echo "  WARNUNG: $d ohne Cargo.toml"
-            fi
-          done
-          echo ""
-          echo "== Vita-Reste =="
-          if [ -f .cargo/config.toml ]; then echo "  .cargo/config.toml vorhanden"; else echo "  keine .cargo/config.toml"; fi
-          if [ -f rust-toolchain.toml ]; then echo "  rust-toolchain.toml vorhanden"; else echo "  keine rust-toolchain.toml"; fi
           echo ""
           echo "== Pflichtdateien pruefen =="
           MISSING=0
@@ -86,10 +75,40 @@ jobs:
             fi
           done
 
+      # ── REIHENFOLGE: Multiarch MUSS vor apt install laufen ──────────
+      - name: aarch64 Multiarch aktivieren
+        run: |
+          set -euo pipefail
+          dpkg --add-architecture arm64
+          cp /etc/apt/sources.list /etc/apt/sources.list.bak
+          sed -i -E 's/^deb (\[[^]]*\] )?http/deb [arch=amd64] http/' /etc/apt/sources.list
+          printf '%s\n' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe' \
+            > /etc/apt/sources.list.d/arm64.list
+          apt-get update
+
+      # ── git MUSS vor dem wgpu-Clone installiert sein ────────────────
+      - name: Build-Pakete installieren (inkl. git)
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends \
+            git build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
+            file patchelf zip unzip imagemagick \
+            libasound2-dev:arm64 libudev-dev:arm64 \
+            libdrm-dev:arm64 libgbm-dev:arm64 \
+            libegl-dev:arm64 libgles2-mesa-dev:arm64
+          echo "== Tool-Versionen =="
+          git --version
+          gcc --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1
+
+      # ── Erst jetzt: wgpu klonen (git ist jetzt da) ──────────────────
       - name: wgpu v27 klonen und Mali-G31-Patch anwenden
         run: |
           set -euo pipefail
-          echo "== wgpu v27 klonen =="
           git clone --depth 1 --branch v27.0.0 \
             https://github.com/gfx-rs/wgpu.git vendor/wgpu
           echo "OK: vendor/wgpu angelegt"
@@ -116,7 +135,7 @@ jobs:
               if vertex_ssbo_false_zero {
                   fragment_shader_storage_blocks
               } else {
-                  0 // Mali-G31 R36S-Fix: Keine SSBOs in keiner Stage
+                  0 // Mali-G31 R36S-Fix
               }
           } else {
               vertex_shader_storage_blocks.min(fragment_shader_storage_blocks)
@@ -125,9 +144,11 @@ jobs:
           if old not in text:
               print("FEHLER: Anker in adapter.rs nicht gefunden", file=sys.stderr)
               sys.exit(1)
+          if new in text:
+              print("OK: Patch bereits vorhanden")
+              sys.exit(0)
 
-          text = text.replace(old, new, 1)
-          open(path, "w").write(text)
+          open(path, "w").write(text.replace(old, new, 1))
           print("OK: wgpu-hal adapter.rs gepatcht.")
           PY
 
@@ -137,33 +158,14 @@ jobs:
             exit 1
           }
 
-          echo "== [patch.crates-io] in Cargo.toml aktivieren =="
-          sed -i 's|^# wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|' Cargo.toml
-          grep -n "wgpu-hal" Cargo.toml
-
-      - name: aarch64 Multiarch aktivieren
-        run: |
-          set -euo pipefail
-          dpkg --add-architecture arm64
-          cp /etc/apt/sources.list /etc/apt/sources.list.bak
-          sed -i -E 's/^deb (\[[^]]*\] )?http/deb [arch=amd64] http/' /etc/apt/sources.list
-          printf '%s\n' \
-            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main universe' \
-            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main universe' \
-            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main universe' \
-            > /etc/apt/sources.list.d/arm64.list
-          apt-get update
-
-      - name: aarch64 Dev-Pakete installieren
-        run: |
-          set -euo pipefail
-          apt-get install -y --no-install-recommends \
-            build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
-            file patchelf zip unzip imagemagick git \
-            libasound2-dev:arm64 libudev-dev:arm64 \
-            libdrm-dev:arm64 libgbm-dev:arm64 \
-            libegl-dev:arm64 libgles2-mesa-dev:arm64
+          echo "== [patch.crates-io] aktivieren =="
+          if ! grep -q '^wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }' Cargo.toml; then
+            sed -i 's|^# wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|wgpu-hal = { path = "vendor/wgpu/wgpu-hal" }|' Cargo.toml
+          fi
+          grep -n "wgpu-hal" Cargo.toml || {
+            echo "::error::[patch.crates-io] wgpu-hal nicht aktiviert"
+            exit 1
+          }
 
       - name: Rust installieren
         run: |
