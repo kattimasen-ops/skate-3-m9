@@ -1,77 +1,58 @@
-#[cfg(target_os = "vita")]
-mod app;
-#[cfg(all(target_os = "vita", feature = "replay"))]
-mod autoplay;
-#[cfg(all(target_os = "vita", feature = "soak"))]
-mod soak;
-#[cfg(target_os = "vita")]
-mod lab;
-#[cfg(target_os = "vita")]
-mod packs;
-#[cfg(target_os = "vita")]
-mod fe_menus;
-#[cfg(target_os = "vita")]
-mod retail_hud;
-mod alloc;
-mod audio;
-#[cfg(target_os = "vita")]
-mod retail_audio;
-#[cfg(target_os = "vita")]
-mod district_stream;
-mod hud;
-mod menu;
-mod button_icons;
-mod replay_camera;
-mod session_replay;
-mod world_replay;
-mod teleporters;
-mod teleporter_icons;
-#[cfg(target_os = "vita")]
-mod called_trails;
-#[cfg(target_os = "vita")]
-mod colour_grade;
-mod settings;
-mod vita_menus;
-mod trick_demo;
-mod skin;
-#[cfg(feature = "stage-profile")]
-mod span_profile;
+use bevy::prelude::*;
+use bevy::app::ScheduleRunnerPlugin;
+use bevy::render::RenderApp;
+use bevy::render::batching::gpu_preprocessing::{
+    GpuPreprocessingMode, GpuPreprocessingSupport,
+};
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{RenderCreation, WgpuSettings, Backends};
 
-/// Small blocks are cached per thread: no lock on the hot path (see `alloc.rs`).
-#[cfg(target_os = "vita")]
-#[global_allocator]
-static ALLOC: alloc::Cached = alloc::Cached;
+mod fb0_writer;
+mod headless_plugin;
 
-#[cfg(target_os = "vita")]
-use vita_newlib_shims as _;
+use headless_plugin::HeadlessFbPlugin;
 
-// Memory layout. Stack, newlib heap and sceLibc heap all live in MAIN.
-#[cfg(target_os = "vita")]
-#[used]
-#[unsafe(export_name = "sceUserMainThreadStackSize")]
-pub static STACK: u32 = 2 * 1024 * 1024;
-#[cfg(target_os = "vita")]
-#[used]
-#[unsafe(export_name = "_newlib_heap_size_user")]
-pub static HEAP: u32 = 304 * 1024 * 1024;
-#[cfg(target_os = "vita")]
-#[used]
-#[unsafe(export_name = "sceLibcHeapSize")]
-pub static LIBC: u32 = 8 * 1024 * 1024;
-
-#[cfg(target_os = "vita")]
 fn main() {
-    // The 3D view of the live simulation, with the input lab one chord away,
-    // and the game loop.
-    #[cfg(feature = "stage-profile")]
-    span_profile::install();
-    app::run();
-}
+    // R36S-Patch: GL-Backend und WebGL2-Fallback erzwingen.
+    // Wird zusätzlich über .cargo/config.toml [env] gesetzt, aber hier
+    // explizit, falls die Config nicht greift.
+    std::env::set_var("WGPU_BACKEND", "gl");
+    std::env::set_var("WGPU_SETTINGS_PRIO", "webgl2");
 
-#[cfg(not(target_os = "vita"))]
-fn main() {
-    println!(
-        "skate vita {}: this binary runs on the PS Vita; build it with `cargo vita build vpk -- --release`",
-        env!("CARGO_PKG_VERSION")
-    );
+    let mut app = App::new();
+
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None, // Headless: kein Fenster
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(WgpuSettings {
+                    backends: Some(Backends::GL),
+                    ..default()
+                }),
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>() // Winit komplett aus
+    )
+    .add_plugins(ScheduleRunnerPlugin::run_loop(
+        std::time::Duration::from_secs_f64(1.0 / 30.0), // 30 fps Cap
+    ))
+    .add_plugins(HeadlessFbPlugin);
+
+    // R36S-Patch: GPU-Preprocessing deaktivieren, BEVOR der RenderApp startet.
+    // Mali-G31 meldet max_compute_workgroup_size_x = 128, also würde Bevy
+    // GPU-Preprocessing aktivieren und mit 4 Storage-Buffern crashen.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.insert_resource(GpuPreprocessingSupport {
+            max_supported_mode: GpuPreprocessingMode::None,
+        });
+    }
+
+    // ... deine Skate-3-Systeme ...
+    // app.add_systems(Startup, ...);
+    // app.add_systems(Update, ...);
+
+    app.run();
 }
