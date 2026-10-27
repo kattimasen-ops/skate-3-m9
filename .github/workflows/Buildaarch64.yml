@@ -26,9 +26,15 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      # Cortex-A35 (RK3326):
+      #   -C target-cpu=cortex-a35     aktiviert CRC + ARMv8-A-Features
+      #   -C target-feature=-outline-atomics  PFLICHT, sonst SIGILL
+      #                                          (A35 hat keine LSE-Atomics)
+      #   --gc-sections / --as-needed  entfernt ungenutzten Code
+      #   -static-libgcc               libc bleibt dynamisch (glibc 2.31)
       RUSTFLAGS: >-
         -C target-cpu=cortex-a35
-        -C target-feature=+crc,-outline-atomics
+        -C target-feature=-outline-atomics
         -C link-arg=-Wl,--gc-sections
         -C link-arg=-Wl,--as-needed
         -C link-arg=-Wl,-O2
@@ -138,6 +144,30 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-unknown-linux-gnu
 
+      # ─────────────────────────────────────────────────────────────
+      # OPTIONAL: Harte glibc-Pin via cargo-zigbuild.
+      # Aktivieren, indem du die Kommentarzeichen entfernst UND den
+      # Standard-Build-Step überspringst. Vorteil: glibc-Version wird
+      # im Linker erzwungen (nicht nur im Container implizit).
+      # Nachteil: Zig-Installation (~50 MB) verlängert den Build.
+      #
+      # - name: Zig + cargo-zigbuild installieren
+      #   run: |
+      #     set -euo pipefail
+      #     export PATH="$HOME/.cargo/bin:$PATH"
+      #     pip3 install ziglang
+      #     cargo install cargo-zigbuild --locked
+      #
+      # - name: Cargo Build mit glibc-Pin
+      #   run: |
+      #     set -euo pipefail
+      #     export PATH="$HOME/.cargo/bin:$PATH"
+      #     cargo zigbuild --release \
+      #       --target aarch64-unknown-linux-gnu.2.30 \
+      #       --workspace \
+      #       --jobs "$JOBS" 2>&1 | tee build.log
+      # ─────────────────────────────────────────────────────────────
+
       - name: Cargo Build (aarch64, workspace)
         run: |
           set -euo pipefail
@@ -199,7 +229,6 @@ jobs:
           rm -rf "$STAGE"
           mkdir -p "$PORT_DIR/$PORT_NAME/assets" "$PORT_DIR/$PORT_NAME/libs.aarch64"
 
-          # ── Binary finden und umbenennen ──────────────────────────
           BIN_SRC=""
           for cand in \
             target/aarch64-unknown-linux-gnu/release/skate-vita \
@@ -208,7 +237,6 @@ jobs:
             [ -f "$cand" ] && [ -x "$cand" ] && BIN_SRC="$cand" && break
           done
           if [ -z "$BIN_SRC" ]; then
-            # Fallback: erstes ausführbares Binary
             BIN_SRC=$(find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
               -type f -executable ! -name "*.so*" ! -name "*.d" | head -n 1)
           fi
@@ -220,17 +248,11 @@ jobs:
           install -m 755 "$BIN_SRC" "$PORT_DIR/$PORT_NAME/$PORT_NAME"
           strip --strip-unneeded "$PORT_DIR/$PORT_NAME/$PORT_NAME" 2>/dev/null || true
 
-          # ── Shared Libs (falls dynamisch gelinkt) ─────────────────
           for lib in target/aarch64-unknown-linux-gnu/release/*.so*; do
             [ -e "$lib" ] && cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/" || true
           done
 
-          # ── Assets-Platzhalter ────────────────────────────────────
           touch "$PORT_DIR/$PORT_NAME/assets/.gitkeep"
-
-          # ── Launcher ──────────────────────────────────────────────
-          # (wird im nächsten Step geschrieben)
-
           echo "PORT_DIR=$PORT_DIR" >> "$GITHUB_ENV"
 
       - name: Launcher-Skript schreiben
@@ -251,7 +273,6 @@ if [ ! -x "$GAMEDIR/skate3" ]; then
     exit 1
 fi
 
-# ── PortMaster control.txt ──────────────────────────────────────────
 controlfolder=""
 for candidate in \
     "/opt/system/Tools/PortMaster" \
@@ -268,7 +289,6 @@ if [ -n "$controlfolder" ] && [ -f "$controlfolder/control.txt" ]; then
     [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
 fi
 
-# ── SDL / Gamepad ──────────────────────────────────────────────────
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
 unset SDL_AUDIODRIVER AUDIODEV
 
@@ -280,7 +300,7 @@ if [ -n "${SDL_GAMECONTROLLERCONFIG:-}" ]; then
     printf '%s\n' "$SDL_GAMECONTROLLERCONFIG" > "$SDL_GAMECONTROLLERCONFIG_FILE" 2>/dev/null || true
 fi
 
-# ── Mali-Symlinks (wie WOTS2) ───────────────────────────────────────
+# Mali-Symlinks (wie WOTS2)
 SYSTEM_MALI=""
 for candidate in \
     /usr/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
@@ -301,23 +321,23 @@ else
     export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
 fi
 
-# ── Runtime-Tuning (WOTS2-Erkenntnisse) ─────────────────────────────
+# Runtime-Tuning (WOTS2-Erkenntnisse)
 export MALLOC_TRIM_THRESHOLD_=131072
 export MALLOC_MMAP_THRESHOLD_=131072
 export SDL_KMSDRM_DOUBLE_BUFFER=1
 export SDL_AUDIO_SAMPLES="${SDL_AUDIO_SAMPLES:-2048}"
 
-# Skate-3-spezifische Performance-Defaults
+# Skate-3-spezifische Performance-Defaults (Vita + WOTS2 Hebel)
 export SKATE3_NO_VSYNC=1
 export SKATE3_NO_SHADOW=1
-export SKATE3_NO_POST=0          # 0 = Post an (Skate 3 braucht Farbkorrektur)
+export SKATE3_NO_POST=0
 export SKATE3_RENDER_WIDTH=448
 export SKATE3_RENDER_HEIGHT=336
 export SKATE3_NPC_DRAW_DIST=10
 export SKATE3_TRAFFIC_DENSITY=0.25
 export SKATE3_PED_DENSITY=0.25
 
-# ── CPU/GPU-Governor (wie WOTS2) ────────────────────────────────────
+# CPU/GPU-Governor (wie WOTS2)
 cpu_gov=""
 for c in /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
          /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
@@ -325,7 +345,7 @@ for c in /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
 done
 [ -n "$cpu_gov" ] && echo performance > "$cpu_gov" 2>/dev/null || true
 
-# ── gptokeyb Killswitch ─────────────────────────────────────────────
+# gptokeyb Killswitch
 GPTOKEYB=""
 for c in "$controlfolder/gptokeyb" /opt/system/Tools/PortMaster/gptokeyb \
          /usr/local/bin/gptokeyb /usr/bin/gptokeyb; do
@@ -336,11 +356,9 @@ if [ -n "$GPTOKEYB" ]; then
     GPTOKEYB_PID=$!
 fi
 
-# ── Start ───────────────────────────────────────────────────────────
 cd "$GAMEDIR"
 ./skate3 "$@" || STATUS=$?
 
-# ── Aufräumen ───────────────────────────────────────────────────────
 [ -n "${GPTOKEYB_PID:-}" ] && kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true
 [ -n "$cpu_gov" ] && echo ondemand > "$cpu_gov" 2>/dev/null || true
 
@@ -387,7 +405,6 @@ LAUNCHER
   }
 }
 JSON
-          echo "port.json geschrieben."
 
       - name: README.md schreiben
         run: |
@@ -406,7 +423,7 @@ This port contains **no game assets**. You must own an Xbox 360 copy of Skate 3 
 3. Run `vita-bake` to produce the `.pak` files.
 4. Copy the `.pak` files into `skate3/assets/`.
 
-The full guide is in the [skate-3-vita README](https://github.com/irolup/skate-3-vita#making-your-own-game-data).
+Full guide: [skate-3-vita README](https://github.com/irolup/skate-3-vita#making-your-own-game-data).
 
 ### Controls
 | Button | Action |
@@ -425,18 +442,15 @@ The full guide is in the [skate-3-vita README](https://github.com/irolup/skate-3
 - Traffic/pedestrian density: **25 %**
 - V-Sync: **off**
 
-These match the Vita port's reductions[reference:3]and the WOTS2 RK3326 tuning.
-
 ### Thanks
 - **dumbad** for the years of Skate 3 reverse engineering.
 - **acklavidian / SK8-ENGINE** for the Rust engine.
-- **irolup** for the Vita port, which proved the engine runs on weak ARM hardware.
-- **St0len-One** for the RK3326 WOTS2 port, whose launcher and Mali workarounds this port reuses.
+- **irolup** for the Vita port.
+- **St0len-One** for the RK3326 WOTS2 port.
 
 ### License
 GPL-3.0-only. Skate and Skate 3 belong to EA. This is an unofficial fan project.
 MD
-          echo "README.md geschrieben."
 
       - name: gameinfo.xml schreiben
         run: |
@@ -460,21 +474,18 @@ MD
   </game>
 </gameList>
 XML
-          echo "gameinfo.xml geschrieben."
 
       - name: Screenshot-Platzhalter erzeugen
         run: |
           set -euo pipefail
           PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          # 640x480 schwarzes JPEG als Platzhalter (PortMaster verlangt exakt 640x480)
+          apt-get install -y --no-install-recommends imagemagick 2>/dev/null || true
           if command -v convert >/dev/null 2>&1; then
             convert -size 640x480 xc:black "$PORT_DIR/screenshot.jpg" 2>/dev/null || true
           fi
           if [ ! -f "$PORT_DIR/screenshot.jpg" ]; then
-            # Minimales 1x1-JPEG, falls ImageMagick fehlt
             printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' \",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9' > "$PORT_DIR/screenshot.jpg"
           fi
-          echo "Screenshot: $(ls -la "$PORT_DIR/screenshot.jpg" 2>/dev/null || echo 'FEHLT')"
 
       - name: PortMaster-ZIP erstellen
         run: |
@@ -482,10 +493,7 @@ XML
           STAGE="$GITHUB_WORKSPACE/dist"
           cd "$STAGE"
           zip -r "skate3.zip" "$PORT_NAME" -x "*.git*"
-          echo "== ZIP-Inhalt =="
           unzip -l "skate3.zip" | head -40
-          echo ""
-          echo "== ZIP-Größe =="
           ls -lah "skate3.zip"
 
       - name: Artefakt hochladen (PortMaster-ZIP)
