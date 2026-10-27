@@ -1,0 +1,27 @@
+{
+  "version": 4,
+  "name": "skate3.zip",
+  "items": [
+    "Skate3.sh",
+    "skate3"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "Skate 3",
+    "porter": ["kattimasen-ops"],
+    "desc": "Skate 3 native ARM64 port for RK3326 (M9 Pro / ArkOS). Based on the skate-3-rust-engine decompilation. Requires your own Xbox 360 ISO to generate the .pak assets.",
+    "desc_md": null,
+    "inst": "Copy your converted .pak files into the skate3/assets/ folder. See README for the full conversion guide.",
+    "inst_md": null,
+    "genres": ["sports"],
+    "image": null,
+    "rtr": false,
+    "exp": true,
+    "runtime": [],
+    "store": [],
+    "availability": "full",
+    "reqs": [],
+    "arch": ["aarch64"],
+    "min_glibc": "2.30"
+  }
+}
