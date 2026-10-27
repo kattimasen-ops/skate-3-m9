@@ -26,12 +26,6 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       RUSTUP_TOOLCHAIN: stable
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      # Cortex-A35 (RK3326):
-      #   -C target-cpu=cortex-a35     aktiviert CRC + ARMv8-A-Features
-      #   -C target-feature=-outline-atomics  PFLICHT, sonst SIGILL
-      #                                          (A35 hat keine LSE-Atomics)
-      #   --gc-sections / --as-needed  entfernt ungenutzten Code
-      #   -static-libgcc               libc bleibt dynamisch (glibc 2.31)
       RUSTFLAGS: >-
         -C target-cpu=cortex-a35
         -C target-feature=-outline-atomics
@@ -53,10 +47,7 @@ jobs:
         with:
           submodules: false
 
-      # ═══════════════════════════════════════════════════════════════
-      # STRUKTUR-CHECK (wie WOTS2)
-      # ═══════════════════════════════════════════════════════════════
-      - name: Repo-Struktur prüfen
+      - name: Repo-Struktur pruefen
         run: |
           set -euo pipefail
           echo "== Root =="; ls -la
@@ -74,10 +65,10 @@ jobs:
           done
           echo ""
           echo "== Vita-Reste =="
-          [ -f .cargo/config.toml ] && { echo "  .cargo/config.toml vorhanden:"; cat .cargo/config.toml; } || echo "  keine .cargo/config.toml"
-          [ -f rust-toolchain.toml ] && { echo "  rust-toolchain.toml vorhanden:"; cat rust-toolchain.toml; } || echo "  keine rust-toolchain.toml"
+          if [ -f .cargo/config.toml ]; then echo "  .cargo/config.toml vorhanden:"; cat .cargo/config.toml; else echo "  keine .cargo/config.toml"; fi
+          if [ -f rust-toolchain.toml ]; then echo "  rust-toolchain.toml vorhanden:"; cat rust-toolchain.toml; else echo "  keine rust-toolchain.toml"; fi
           echo ""
-          echo "== Fehlende Mitglieder prüfen =="
+          echo "== Fehlende Mitglieder pruefen =="
           MISSING=0
           for m in $(grep -oE 'crates/[a-zA-Z0-9_-]+' Cargo.toml | sort -u); do
             if [ ! -f "$m/Cargo.toml" ]; then
@@ -123,7 +114,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu pkg-config curl ca-certificates \
-            file patchelf zip unzip \
+            file patchelf zip unzip imagemagick \
             libasound2-dev:arm64 libudev-dev:arm64 \
             libdrm-dev:arm64 libgbm-dev:arm64 \
             libegl-dev:arm64 libgles2-mesa-dev:arm64
@@ -138,35 +129,11 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: aarch64-Target hinzufügen
+      - name: aarch64-Target hinzufuegen
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add aarch64-unknown-linux-gnu
-
-      # ─────────────────────────────────────────────────────────────
-      # OPTIONAL: Harte glibc-Pin via cargo-zigbuild.
-      # Aktivieren, indem du die Kommentarzeichen entfernst UND den
-      # Standard-Build-Step überspringst. Vorteil: glibc-Version wird
-      # im Linker erzwungen (nicht nur im Container implizit).
-      # Nachteil: Zig-Installation (~50 MB) verlängert den Build.
-      #
-      # - name: Zig + cargo-zigbuild installieren
-      #   run: |
-      #     set -euo pipefail
-      #     export PATH="$HOME/.cargo/bin:$PATH"
-      #     pip3 install ziglang
-      #     cargo install cargo-zigbuild --locked
-      #
-      # - name: Cargo Build mit glibc-Pin
-      #   run: |
-      #     set -euo pipefail
-      #     export PATH="$HOME/.cargo/bin:$PATH"
-      #     cargo zigbuild --release \
-      #       --target aarch64-unknown-linux-gnu.2.30 \
-      #       --workspace \
-      #       --jobs "$JOBS" 2>&1 | tee build.log
-      # ─────────────────────────────────────────────────────────────
 
       - name: Cargo Build (aarch64, workspace)
         run: |
@@ -186,28 +153,28 @@ jobs:
           echo "== Release-Verzeichnis =="
           ls -la target/aarch64-unknown-linux-gnu/release/ 2>/dev/null || true
           echo ""
-          echo "== Ausführbare Binaries (Top-Level) =="
+          echo "== Ausfuehrbare Binaries (Top-Level) =="
           find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
             -type f -executable ! -name "*.so*" ! -name "*.d" 2>/dev/null || true
 
-      - name: glibc 2.30 prüfen
+      - name: glibc 2.30 pruefen
         run: |
           set -euo pipefail
           BIN_DIR=target/aarch64-unknown-linux-gnu/release
           BINS=$(find "$BIN_DIR" -maxdepth 1 -type f -executable \
                  ! -name "*.so*" ! -name "*.d" 2>/dev/null)
           if [ -z "$BINS" ]; then
-            echo "::error::Kein ausführbares Binary in $BIN_DIR gefunden"
+            echo "::error::Kein ausfuehrbares Binary in $BIN_DIR gefunden"
             exit 1
           fi
           FAIL=0
           for BIN in $BINS; do
-            echo "== Prüfe: $BIN =="
+            echo "== Pruefe: $BIN =="
             file "$BIN"
             MAX=$(aarch64-linux-gnu-objdump -T "$BIN" \
               | { grep -oE 'GLIBC_[0-9][0-9.]*' || true; } \
               | sed 's/^GLIBC_//' | sort -Vu | tail -1)
-            echo "  Höchste GLIBC-Version: ${MAX:-keine}"
+            echo "  Hoechste GLIBC-Version: ${MAX:-keine}"
             if [ -n "$MAX" ] && [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$MAX" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
               echo "  ::error::Braucht GLIBC_$MAX, ArkOS hat nur $MAX_GLIBC"
               FAIL=1
@@ -217,9 +184,6 @@ jobs:
           done
           exit $FAIL
 
-      # ═══════════════════════════════════════════════════════════════
-      # PORTMASTER-PAKET VORBEREITEN
-      # ═══════════════════════════════════════════════════════════════
       - name: PortMaster-Paket vorbereiten
         if: always()
         run: |
@@ -234,7 +198,7 @@ jobs:
             target/aarch64-unknown-linux-gnu/release/skate-vita \
             target/aarch64-unknown-linux-gnu/release/skate3 \
             target/aarch64-unknown-linux-gnu/release/skate; do
-            [ -f "$cand" ] && [ -x "$cand" ] && BIN_SRC="$cand" && break
+            if [ -f "$cand" ] && [ -x "$cand" ]; then BIN_SRC="$cand"; break; fi
           done
           if [ -z "$BIN_SRC" ]; then
             BIN_SRC=$(find target/aarch64-unknown-linux-gnu/release -maxdepth 1 \
@@ -249,7 +213,7 @@ jobs:
           strip --strip-unneeded "$PORT_DIR/$PORT_NAME/$PORT_NAME" 2>/dev/null || true
 
           for lib in target/aarch64-unknown-linux-gnu/release/*.so*; do
-            [ -e "$lib" ] && cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/" || true
+            if [ -e "$lib" ]; then cp -a "$lib" "$PORT_DIR/$PORT_NAME/libs.aarch64/"; fi
           done
 
           touch "$PORT_DIR/$PORT_NAME/assets/.gitkeep"
@@ -261,7 +225,7 @@ jobs:
           PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
           cat > "$PORT_DIR/Skate 3.sh" <<'LAUNCHER'
 #!/bin/bash
-# Skate 3 — PortMaster Launcher für RK3326 / M9 Pro / ArkOS4Clone
+# Skate 3 - PortMaster Launcher fuer RK3326 / M9 Pro / ArkOS4Clone
 set -euo pipefail
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -280,13 +244,12 @@ for candidate in \
     "$XDG_DATA_HOME/PortMaster" \
     "/roms/ports/PortMaster" \
     "/roms/tools/PortMaster"; do
-    [ -d "$candidate" ] && controlfolder="$candidate" && break
+    if [ -d "$candidate" ]; then controlfolder="$candidate"; break; fi
 done
 
 if [ -n "$controlfolder" ] && [ -f "$controlfolder/control.txt" ]; then
-    # shellcheck disable=SC1090
     source "$controlfolder/control.txt"
-    [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
+    if [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ]; then source "${controlfolder}/mod_${CFW_NAME}.txt"; fi
 fi
 
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
@@ -300,7 +263,7 @@ if [ -n "${SDL_GAMECONTROLLERCONFIG:-}" ]; then
     printf '%s\n' "$SDL_GAMECONTROLLERCONFIG" > "$SDL_GAMECONTROLLERCONFIG_FILE" 2>/dev/null || true
 fi
 
-# Mali-Symlinks (wie WOTS2)
+# Mali-Symlinks (WOTS2-Erkenntnis)
 SYSTEM_MALI=""
 for candidate in \
     /usr/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so \
@@ -308,7 +271,7 @@ for candidate in \
     /usr/lib/aarch64-linux-gnu/libmali.so.1 \
     /usr/lib/aarch64-linux-gnu/libmali.so \
     /usr/lib/aarch64-linux-gnu/libEGL.so.1; do
-    [ -f "$candidate" ] && SYSTEM_MALI="$candidate" && break
+    if [ -f "$candidate" ]; then SYSTEM_MALI="$candidate"; break; fi
 done
 if [ -n "$SYSTEM_MALI" ]; then
     rm -rf /tmp/skate3-mali
@@ -327,7 +290,7 @@ export MALLOC_MMAP_THRESHOLD_=131072
 export SDL_KMSDRM_DOUBLE_BUFFER=1
 export SDL_AUDIO_SAMPLES="${SDL_AUDIO_SAMPLES:-2048}"
 
-# Skate-3-spezifische Performance-Defaults (Vita + WOTS2 Hebel)
+# Skate-3 Performance-Defaults (Vita + WOTS2-Hebel)
 export SKATE3_NO_VSYNC=1
 export SKATE3_NO_SHADOW=1
 export SKATE3_NO_POST=0
@@ -337,32 +300,34 @@ export SKATE3_NPC_DRAW_DIST=10
 export SKATE3_TRAFFIC_DENSITY=0.25
 export SKATE3_PED_DENSITY=0.25
 
-# CPU/GPU-Governor (wie WOTS2)
+# CPU-Governor (WOTS2-Erkenntnis)
 cpu_gov=""
 for c in /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
          /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
-    [ -w "$c" ] && cpu_gov="$c" && break
+    if [ -w "$c" ]; then cpu_gov="$c"; break; fi
 done
-[ -n "$cpu_gov" ] && echo performance > "$cpu_gov" 2>/dev/null || true
+if [ -n "$cpu_gov" ]; then echo performance > "$cpu_gov" 2>/dev/null || true; fi
 
 # gptokeyb Killswitch
 GPTOKEYB=""
 for c in "$controlfolder/gptokeyb" /opt/system/Tools/PortMaster/gptokeyb \
          /usr/local/bin/gptokeyb /usr/bin/gptokeyb; do
-    [ -x "$c" ] && GPTOKEYB="$c" && break
+    if [ -x "$c" ]; then GPTOKEYB="$c"; break; fi
 done
+GPTOKEYB_PID=""
 if [ -n "$GPTOKEYB" ]; then
     "$GPTOKEYB" "$GAMEDIR/skate3" -k skate3 &
     GPTOKEYB_PID=$!
 fi
 
 cd "$GAMEDIR"
+STATUS=0
 ./skate3 "$@" || STATUS=$?
 
-[ -n "${GPTOKEYB_PID:-}" ] && kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true
-[ -n "$cpu_gov" ] && echo ondemand > "$cpu_gov" 2>/dev/null || true
+if [ -n "$GPTOKEYB_PID" ]; then kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true; fi
+if [ -n "$cpu_gov" ]; then echo ondemand > "$cpu_gov" 2>/dev/null || true; fi
 
-exit ${STATUS:-0}
+exit "$STATUS"
 LAUNCHER
           chmod 755 "$PORT_DIR/Skate 3.sh"
 
@@ -381,16 +346,12 @@ LAUNCHER
   "items_opt": [],
   "attr": {
     "title": "Skate 3",
-    "porter": [
-      "kattimasen-ops"
-    ],
+    "porter": ["kattimasen-ops"],
     "desc": "Skate 3 native ARM64 port for RK3326 (M9 Pro / ArkOS). Based on the skate-3-rust-engine decompilation. Requires your own Xbox 360 ISO to generate the .pak assets.",
     "desc_md": null,
     "inst": "Copy your converted .pak files into the skate3/assets/ folder. See README for the full conversion guide.",
     "inst_md": null,
-    "genres": [
-      "sports"
-    ],
+    "genres": ["sports"],
     "image": null,
     "rtr": false,
     "exp": true,
@@ -398,9 +359,7 @@ LAUNCHER
     "store": [],
     "availability": "full",
     "reqs": [],
-    "arch": [
-      "aarch64"
-    ],
+    "arch": ["aarch64"],
     "min_glibc": "2.30"
   }
 }
@@ -411,11 +370,11 @@ JSON
           set -euo pipefail
           PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
           cat > "$PORT_DIR/README.md" <<'MD'
-## Skate 3 — RK3326 Port
+## Skate 3 - RK3326 Port
 
 Native ARM64 port of **Skate 3** for the **M9 Pro / RK3326 / ArkOS4Clone**, built from the [skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) decompilation and the [skate-3-vita](https://github.com/irolup/skate-3-vita) port.
 
-### ⚠️ You need your own game data
+### You need your own game data
 This port contains **no game assets**. You must own an Xbox 360 copy of Skate 3 and convert it to `.pak` files on a Linux machine (Termux + proot-distro works on Android).
 
 1. Extract your ISO with `extract-xiso`.
@@ -436,10 +395,10 @@ Full guide: [skate-3-vita README](https://github.com/irolup/skate-3-vita#making-
 | Start | Pause |
 
 ### Performance notes (RK3326)
-- Render resolution: **448×336**
+- Render resolution: **448x336**
 - Shadows: **off**
 - NPC draw distance: **10u**
-- Traffic/pedestrian density: **25 %**
+- Traffic/pedestrian density: **25%**
 - V-Sync: **off**
 
 ### Thanks
@@ -479,13 +438,10 @@ XML
         run: |
           set -euo pipefail
           PORT_DIR="$GITHUB_WORKSPACE/dist/$PORT_NAME"
-          apt-get install -y --no-install-recommends imagemagick 2>/dev/null || true
-          if command -v convert >/dev/null 2>&1; then
-            convert -size 640x480 xc:black "$PORT_DIR/screenshot.jpg" 2>/dev/null || true
-          fi
-          if [ ! -f "$PORT_DIR/screenshot.jpg" ]; then
-            printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' \",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9' > "$PORT_DIR/screenshot.jpg"
-          fi
+          convert -size 640x480 xc:black -gravity center \
+                  -fill white -pointsize 48 -annotate 0 "Skate 3" \
+                  "$PORT_DIR/screenshot.jpg"
+          file "$PORT_DIR/screenshot.jpg"
 
       - name: PortMaster-ZIP erstellen
         run: |
